@@ -12,4 +12,15 @@ class RMSNorm(nn.Module):
         self.weight=nn.Parameter(torch.ones(dim))
     
     def forward(self, x:Tensor)->Tensor:
-        return rms(x, self.eps)+self.weight
+        return rms(x, self.eps)*self.weight
+
+
+# transformer
+
+class PreNorm(nn.Module):
+    def __init__(self, dim:int, fn:nn.Module, eps:float):
+        self.norm=RMSNorm(dim, eps=eps)
+        self.fn=fn
+
+    def forward(self, x:Tensor)->Tensor:
+        return self.fn(self.fn(x))
