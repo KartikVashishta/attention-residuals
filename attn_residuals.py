@@ -1,3 +1,4 @@
+from turtle import forward
 import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
@@ -21,6 +22,7 @@ class RMSNorm(nn.Module):
 
 class PreNorm(nn.Module):
     def __init__(self, dim:int, fn:nn.Module, eps:float):
+        super().__init__()
         self.norm=RMSNorm(dim, eps=eps)
         self.fn=fn
 
@@ -29,6 +31,7 @@ class PreNorm(nn.Module):
 
 class CausalAttention(nn.Module):
     def __init__(self, dim: int, heads:int=8, dim_head:int=64, dropout: float=0.0):
+        super().__init__()
         inner_dim=heads*dim_head
         self.heads=heads
         self.dim_head=dim_head
@@ -48,3 +51,18 @@ class CausalAttention(nn.Module):
         out=F.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p=self.dropout if self.training else 0.0)
         out=rearrange(out, "b h t d -> b t (h d)")
         return self.to_out(out)
+
+class SwiGLU(nn.Module):
+    def __init__(self, dim: int, mult:int=4, dropout:float=0.0):
+        # dropout not needed unless training on a smaller training data
+        super().__init__()
+        inner_dim=dim*mult
+        self.to_hidden=nn.Linear(dim, inner_dim*2, bias=False)
+        self.to_out=nn.Linear(inner_dim,dim,bias=False)
+        self.dropout=nn.Dropout(dropout)
+
+    def forward(self, x:Tensor)->Tensor:
+        gate, value = self.to_hidden(x).chunk(2,dim=-1)
+        x = F.silu(gate)*value
+        x = self.dropout(x)
+        return self.to_out(x)
