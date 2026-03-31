@@ -295,3 +295,34 @@ class SwiGLU(nn.Module):
         x = F.silu(gate)*value
         x = self.dropout(x)
         return self.to_out(x)
+
+class AttnResTransformer(nn.Module):
+    """
+    Small GPT-style reference model using AttnRes
+
+    Using plain PyTorch: tok/pos embedding, alternating
+    causal attn, SwiGLU MLP layers, final norm, output head.
+    """
+    def __init__(
+        self,
+        *,
+        num_tokens:int,
+        dim:int,
+        depth:int,
+        max_seq_len:int,
+        heads:int = 8,
+        dim_head:int = 64,
+        ff_mult:int = 4,
+        attn_dropout:float = 0.0,
+        attnres:str = 'block', # full or block 
+        block_size:int = 8,
+        zero_init_queries: bool = True,
+        is_final_aggregate:bool = True,
+        eps: float = 1e-8
+    ):
+        super().__init__()
+        assert attnres in {'full', 'block'}
+        self.max_seq_len=max_seq_len
+        self.attnres=attnres
+        self.token_emb=nn.Embedding(num_tokens, dim)
+        self.pos_emb = nn.Embedding(max_seq_len, dim)
