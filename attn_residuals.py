@@ -44,6 +44,16 @@ class DepthResidual(nn.Module):
         out=torch.einsum('n b t, n b t d ->', weights, sources.float())
         return out.to(sources.dtype)
 
+class DepthResidualList(nn.Module):
+    def __init__(self, dim: int, depth: int, eps: float, zero_init: bool = True):
+        super().__init__()
+        # for L layers (depth), create depth residual modules
+        self.layers = nn.ModuleList([DepthResidual(dim, eps=eps, zero_init=zero_init) for _ in range(depth)])
+    
+    def __getitem__(self, idx:int): return self.layers[idx]
+    def __iter__(self, idx:int): return iter(self.layers)
+    def __len__(self, idx:int): return len(self.layers)
+
 # transformer
 class PreNorm(nn.Module):
     def __init__(self, dim:int, fn:nn.Module, eps:float):
