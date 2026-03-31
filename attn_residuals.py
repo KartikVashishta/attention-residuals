@@ -250,7 +250,7 @@ def merge_attn_stats(a: SingleAttnStats, b: SingleAttnStats) -> SingleAttnStats:
 
 # transformer
 class PreNorm(nn.Module):
-    def __init__(self, dim:int, fn:nn.Module, eps:float):
+    def __init__(self, dim:int, fn:nn.Module, eps:float=1e-8):
         super().__init__()
         self.norm=RMSNorm(dim, eps=eps)
         self.fn=fn
