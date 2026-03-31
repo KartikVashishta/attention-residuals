@@ -57,54 +57,6 @@ class DepthResidualList(nn.Module):
     def __iter__(self, idx:int): return iter(self.layers)
     def __len__(self, idx:int): return len(self.layers)
 
-# transformer
-class PreNorm(nn.Module):
-    def __init__(self, dim:int, fn:nn.Module, eps:float):
-        super().__init__()
-        self.norm=RMSNorm(dim, eps=eps)
-        self.fn=fn
-
-    def forward(self, x:Tensor)->Tensor:
-        return self.fn(self.norm(x))
-
-class CausalAttention(nn.Module):
-    def __init__(self, dim: int, heads:int=8, dim_head:int=64, dropout: float=0.0):
-        super().__init__()
-        inner_dim=heads*dim_head
-        self.heads=heads
-        self.dim_head=dim_head
-        self.dropout=dropout
-
-        self.to_qkv=nn.Linear(dim, inner_dim*3, bias=False)
-        self.to_out=nn.Linear(inner_dim, dim, bias=False)
-
-    def forward(self, x: Tensor)->Tensor:
-        q, k, v = self.to_qkv(x).chunk(3, dim=-1)
-
-        def split_heads(y: Tensor)->Tensor:
-            return rearrange(y, "b t (h d) -> b h t d", h=self.heads)
-        
-        q, k, v = map(split_heads, (q, k, v))
-
-        out=F.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p=self.dropout if self.training else 0.0)
-        out=rearrange(out, "b h t d -> b t (h d)")
-        return self.to_out(out)
-
-class SwiGLU(nn.Module):
-    def __init__(self, dim: int, mult:int=4, dropout:float=0.0):
-        # dropout not needed unless training on a smaller training data
-        super().__init__()
-        inner_dim=dim*mult
-        self.to_hidden=nn.Linear(dim, inner_dim*2, bias=False)
-        self.to_out=nn.Linear(inner_dim,dim,bias=False)
-        self.dropout=nn.Dropout(dropout)
-
-    def forward(self, x:Tensor)->Tensor:
-        gate, value = self.to_hidden(x).chunk(2,dim=-1)
-        x = F.silu(gate)*value
-        x = self.dropout(x)
-        return self.to_out(x)
-
 # attnres stacks
 
 class FullAttnResStack(nn.Module):
@@ -295,3 +247,51 @@ def merge_attn_stats(a: SingleAttnStats, b: SingleAttnStats) -> SingleAttnStats:
     numer=wa[..., None] * a.numer + wb[..., None] * b.numer
     denom=wa * a.denom + wb * b.denom
     return SingleAttnStats(numer, m, denom)
+
+# transformer
+class PreNorm(nn.Module):
+    def __init__(self, dim:int, fn:nn.Module, eps:float):
+        super().__init__()
+        self.norm=RMSNorm(dim, eps=eps)
+        self.fn=fn
+
+    def forward(self, x:Tensor)->Tensor:
+        return self.fn(self.norm(x))
+
+class CausalAttention(nn.Module):
+    def __init__(self, dim: int, heads:int=8, dim_head:int=64, dropout: float=0.0):
+        super().__init__()
+        inner_dim=heads*dim_head
+        self.heads=heads
+        self.dim_head=dim_head
+        self.dropout=dropout
+
+        self.to_qkv=nn.Linear(dim, inner_dim*3, bias=False)
+        self.to_out=nn.Linear(inner_dim, dim, bias=False)
+
+    def forward(self, x: Tensor)->Tensor:
+        q, k, v = self.to_qkv(x).chunk(3, dim=-1)
+
+        def split_heads(y: Tensor)->Tensor:
+            return rearrange(y, "b t (h d) -> b h t d", h=self.heads)
+        
+        q, k, v = map(split_heads, (q, k, v))
+
+        out=F.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p=self.dropout if self.training else 0.0)
+        out=rearrange(out, "b h t d -> b t (h d)")
+        return self.to_out(out)
+
+class SwiGLU(nn.Module):
+    def __init__(self, dim: int, mult:int=4, dropout:float=0.0):
+        # dropout not needed unless training on a smaller training data
+        super().__init__()
+        inner_dim=dim*mult
+        self.to_hidden=nn.Linear(dim, inner_dim*2, bias=False)
+        self.to_out=nn.Linear(inner_dim,dim,bias=False)
+        self.dropout=nn.Dropout(dropout)
+
+    def forward(self, x:Tensor)->Tensor:
+        gate, value = self.to_hidden(x).chunk(2,dim=-1)
+        x = F.silu(gate)*value
+        x = self.dropout(x)
+        return self.to_out(x)
