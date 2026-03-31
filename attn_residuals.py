@@ -4,8 +4,8 @@ import torch.nn.functional as F
 
 from einops import rearrange
 
-def rms(x: Tensor, eps: float):
-    return x*torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True)+eps)
+def exists(x): return x is not None
+def rms(x: Tensor, eps: float): return x*torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True)+eps)
 
 class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float):
@@ -32,9 +32,12 @@ class DepthResidual(nn.Module):
         if not zero_init:
             nn.init.normal_(self.query, std=0.02)
 
+    def effective_query(self) -> Tensor:
+        return (self.query*self.norm.weight).float()
+
     def logits(self, sources: Tensor |list[Tensor]| tuple[Tensor,...])->Tensor:
         sources=stack_layers(sources) # [n, b, t, d]
-        q=(self.query*self.norm.weight).float() #[d]
+        q=self.effective_query() #[d]
         k = rms(sources.float(), self.norm.eps) # [n, b, t, d]
         return torch.einsum("d, n b t d -> n b t", q, k)
 
@@ -102,6 +105,63 @@ class SwiGLU(nn.Module):
         x = self.dropout(x)
         return self.to_out(x)
 
+# attnres stacks
+
+class FullAttnResStack(nn.Module):
+    def __init__(self, dim: int, layers, *, eps: float=1e-8, zero_init_queries:bool=True, is_final_aggregate:bool=True):
+        super().__init__()
+        self.layers=nn.ModuleList(list(layers))
+        self.eps=eps
+        
+        depth=len(self.layers)
+        self.residuals = DepthResidualList(dim, depth, eps, zero_init_queries)
+        self.final_residual = DepthResidual(dim, eps, zero_init_queries) if is_final_aggregate else None
+    
+    def forward_naive(self, x: Tensor)->Tensor:
+        sources = [x]
+        for layer, residual in zip(self.layers, self.residuals):
+            h = residual(sources)
+            out = layer(h)
+            sources.append(out)
+        
+        return self.final_residual(sources) if exists(self.final_residual) else sources[-1]
+
+    def forward_two_phase(self, x: Tensor, schedule_block_size:int)->Tensor:
+        assert schedule_block_size>0
+        sources=[x]
+        depth=len(self.layers)
+
+        start=0
+        while start<depth:
+            end = min(start+schedule_block_size, depth)
+            queries =torch.stack([self.residuals[i].effective_query() for i in range(start, end)], dim=0)
+            inter_sources=stack_layers(sources)
+            inter_stats = attn_with_stats(queries, inter_sources, self.eps)
+
+            local_outputs=[] # outputs of intra-block
+            for local_idx, layer_idx in enumerate(range(start, end)):
+                stats = inter_stats.select(local_idx)
+                if len(local_outputs)>0:
+                    intra_sources = stack_layers(local_outputs)
+                    intra = attn_with_stats(queries[local_idx:local_idx+1], intra_sources, self.eps).select(0)
+                    stats = merge_attn_stats(stats, intra)
+                h=stats.normalized()
+                out = self.layers[layer_idx](h)
+                local_outputs.append(out)
+                sources.append(out)
+            
+            start=end
+        
+        return self.final_residual(sources) if exists(self.final_residual) else sources[-1]
+
+    def forward(self, x: Tensor, schedule_block_size: int | None = None) -> Tensor:
+        if schedule_block_size is None:
+            return self.forward_naive(x)
+        return self.forward_two_phase(x, schedule_block_size)
+
+class BlockAttnResStack(nn.Module):
+    pass
+
 # helpers
 
 def stack_layers(sources: Tensor |
@@ -151,3 +211,16 @@ def attn_with_stats(queries: Tensor, sources: Tensor, eps: float=1e-8) -> AttnSt
     numer = torch.einsum('q n b t, n b t d -> q b t d', weights, sources)
     denom = weights.sum(dim=1)
     return AttnStats(numer, denom, m)
+
+def single_source_stats(query: Tensor, source: Tensor, eps:float=1e-8) -> SingleAttnStats:
+    score = torch.einsum('d, b t d -> b t', query, rms(source, eps))
+    denom = torch.ones_like(score)
+    return SingleAttnStats(source, score, denom)
+
+def merge_attn_stats(a: SingleAttnStats, b: SingleAttnStats) -> SingleAttnStats:
+    m=torch.maximum(a.max, b.max)
+    wa=torch.exp(a.max - m)
+    wb=torch.exp(b.max - m)
+    numer=wa[..., None] * a.numer + wb[..., None] * b.numer
+    denom=wa * a.denom + wb * b.denom
+    return SingleAttnStats(numer, m, denom)
