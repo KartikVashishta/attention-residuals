@@ -54,8 +54,8 @@ class DepthResidualList(nn.Module):
         self.layers = nn.ModuleList([DepthResidual(dim, eps=eps, zero_init=zero_init) for _ in range(depth)])
 
     def __getitem__(self, idx:int) -> DepthResidual: return self.layers[idx]
-    def __iter__(self, idx:int): return iter(self.layers)
-    def __len__(self, idx:int): return len(self.layers)
+    def __iter__(self): return iter(self.layers)
+    def __len__(self): return len(self.layers)
 
 # attnres stacks
 
@@ -238,7 +238,7 @@ def attn_with_stats(queries: Tensor, sources: Tensor, eps: float=1e-8) -> AttnSt
 def single_source_stats(query: Tensor, source: Tensor, eps:float=1e-8) -> SingleAttnStats:
     score = torch.einsum('d, b t d -> b t', query, rms(source, eps))
     denom = torch.ones_like(score)
-    return SingleAttnStats(source, score, denom)
+    return SingleAttnStats(source, denom, score)
 
 def merge_attn_stats(a: SingleAttnStats, b: SingleAttnStats) -> SingleAttnStats:
     m=torch.maximum(a.max, b.max)
@@ -246,7 +246,7 @@ def merge_attn_stats(a: SingleAttnStats, b: SingleAttnStats) -> SingleAttnStats:
     wb=torch.exp(b.max - m)
     numer=wa[..., None] * a.numer + wb[..., None] * b.numer
     denom=wa * a.denom + wb * b.denom
-    return SingleAttnStats(numer, m, denom)
+    return SingleAttnStats(numer, denom, m)
 
 # transformer
 class PreNorm(nn.Module):
