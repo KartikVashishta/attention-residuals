@@ -35,13 +35,13 @@ class DepthResidual(nn.Module):
     def logits(self, sources: Tensor |list[Tensor]| tuple[Tensor,...])->Tensor:
         sources=stack_layers(sources) # [n, b, t, d]
         q=(self.query*self.norm.weight).float() #[d]
-        k = rms(sources.float, self.norm.eps) # [n, b, t, d]
+        k = rms(sources.float(), self.norm.eps) # [n, b, t, d]
         return torch.einsum("d, n b t d -> n b t", q, k)
 
     def forward(self, sources: Tensor | list[Tensor] | tuple[Tensor, ...])->Tensor:
         sources=stack_layers(sources)
         weights=self.logits(sources).softmax(dim=0)
-        out=torch.einsum('n b t, n b t d ->', weights, sources.float())
+        out=torch.einsum('n b t, n b t d -> b t d', weights, sources.float())
         return out.to(sources.dtype)
 
 class DepthResidualList(nn.Module):
@@ -49,8 +49,8 @@ class DepthResidualList(nn.Module):
         super().__init__()
         # for L layers (depth), create depth residual modules
         self.layers = nn.ModuleList([DepthResidual(dim, eps=eps, zero_init=zero_init) for _ in range(depth)])
-    
-    def __getitem__(self, idx:int): return self.layers[idx]
+
+    def __getitem__(self, idx:int) -> DepthResidual: return self.layers[idx]
     def __iter__(self, idx:int): return iter(self.layers)
     def __len__(self, idx:int): return len(self.layers)
 
@@ -113,3 +113,41 @@ def stack_layers(sources: Tensor |
     assert len(sources)>0, 'needs at least one source'
     return torch.stack(tuple(sources), dim=0)
 
+class SingleAttnStats:
+    def __init__(self, numer: Tensor, denom: Tensor, max:Tensor):
+        self.numer=numer #[b,t,d]
+        self.max=max #[b,t]
+        self.denom=denom #[b,t]
+
+    def normalized(self) -> Tensor:
+        return self.numer/self.denom[..., None]        
+
+class AttnStats:
+    # store the numerator => e^{s_{j}-m} * v_j where m is the max score so far
+    # store the max m = max(s_j)
+    # store the denominator sum_j e^{s_{j}-m}
+    def __init__(self, numer: Tensor, denom: Tensor, max: Tensor):
+        self.numer=numer #[q,b,t,d]
+        self.max=max #[q,b,t]
+        self.denom=denom #[q,b,t]
+    
+    def select(self, idx:int) -> 'SingleAttnStats':
+        return SingleAttnStats(self.numer[idx], self.denom[idx], self.max[idx])
+
+def attn_with_stats(queries: Tensor, sources: Tensor, eps: float=1e-8) -> AttnStats:
+    """
+    queries: [q, d]
+    sources: [n, b, t, d]
+
+    Returns the following for online softmax:
+        numer = sum_i exp(logit_i - m)*v_i
+        m = max_i logit_i
+        denom = sum_i exp(logit_i - m)
+    """
+    normed = rms(sources, eps)
+    logits = torch.einsum('q d, n b t d -> q n b t', queries,normed)
+    m = logits.amax(dim=1)
+    weights = torch.exp(logits - m[:, None])
+    numer = torch.einsum('q n b t, n b t d -> q b t d', weights, sources)
+    denom = weights.sum(dim=1)
+    return AttnStats(numer, denom, m)
