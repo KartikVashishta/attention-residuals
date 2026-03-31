@@ -314,6 +314,7 @@ class AttnResTransformer(nn.Module):
         dim_head:int = 64,
         ff_mult:int = 4,
         attn_dropout:float = 0.0,
+        ff_dropout:float = 0.0,
         attnres:str = 'block', # full or block 
         block_size:int = 8,
         zero_init_queries: bool = True,
@@ -326,3 +327,25 @@ class AttnResTransformer(nn.Module):
         self.attnres=attnres
         self.token_emb=nn.Embedding(num_tokens, dim)
         self.pos_emb = nn.Embedding(max_seq_len, dim)
+
+        atomic_layers = []
+        for _ in range(depth):
+            atomic_layers.append(PreNorm(dim, CausalAttention(dim, heads, dim_head, attn_dropout),eps))
+            atomic_layers.append(PreNorm(dim, SwiGLU(dim, ff_mult, ff_dropout),eps))
+        if attnres == 'full': self.backbone=FullAttnResStack(dim, atomic_layers, eps=eps, zero_init_queries=zero_init_queries, is_final_aggregate=is_final_aggregate)
+        else: self.backbone=BlockAttnResStack(dim, atomic_layers, block_size=block_size ,eps=eps, zero_init_queries=zero_init_queries, is_final_aggregate=is_final_aggregate)
+        
+        self.final_norm=RMSNorm(dim, eps)
+        self.to_logits=nn.Linear(dim, num_tokens, bias=False)
+
+    def forward(self, ids: Tensor, schedule_block_size: int | None = None) -> Tensor:
+        b, t = ids.shape
+        assert t <= self.max_seq_len
+        pos = torch.arange(t, device=ids.device)
+        x = self.token_emb(ids) + self.pos_emb(pos)[None, :, :]
+        if self.attnres == 'full':
+            x = self.backbone(x, schedule_block_size=schedule_block_size)
+        else:
+            x = self.backbone(x)
+        x = self.final_norm(x)
+        return self.to_logits(x)
