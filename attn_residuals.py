@@ -108,6 +108,12 @@ class SwiGLU(nn.Module):
 # attnres stacks
 
 class FullAttnResStack(nn.Module):
+    """
+    Full AttnRes over atomic layers 
+    eg: f_1,...,f_L
+    Each entry in `layers` should already be a full atomic layer fxn
+    x -> f_l(x)
+    """
     def __init__(self, dim: int, layers, *, eps: float=1e-8, zero_init_queries:bool=True, is_final_aggregate:bool=True):
         super().__init__()
         self.layers=nn.ModuleList(list(layers))
@@ -160,7 +166,72 @@ class FullAttnResStack(nn.Module):
         return self.forward_two_phase(x, schedule_block_size)
 
 class BlockAttnResStack(nn.Module):
-    pass
+    f"""
+    Block AttnRes over atomic layers
+
+    `block_size` is in atomic layers, not Transformer blocks.
+        Eg: block_size=8 -> 4 transformer blocks when layers alternate attn/MLP
+
+    The default forward path is the two-phase algorithm from the paper:
+        phase 1: batch inter-block attn from all queries in the block
+        phase 2: merge the evolving intra-block partial sum with online softmax 
+    """
+    def __init__(self, dim:int, layers, *, block_size: int, eps: float = 1e-8, zero_init_queries: bool = True, is_final_aggregate: bool = True):
+        super().__init__()
+        self.layers = nn.ModuleList(list(layers))
+        assert len(self.layers) > 0
+        assert block_size > 0
+        self.block_size = block_size
+        self.eps = eps
+
+        depth = len(self.layers)
+        self.residuals = DepthResidualList(dim, depth, eps=eps, zero_init=zero_init_queries)
+        self.final_residual = DepthResidual(dim, eps=eps, zero_init=zero_init_queries) if is_final_aggregate else None
+
+    def forward_naive(self, x: Tensor) -> Tensor:
+        blocks = [x]  # b_0=embedding/input representation
+        partial = None
+
+        for layer_idx, (layer, residual) in enumerate(zip(self.layers, self.residuals), start=1):
+            sources = blocks if partial is None else blocks + [partial]
+            h = residual(sources)
+            out = layer(h)
+            partial = out if partial is None else (partial + out)
+
+            if (layer_idx % self.block_size == 0) or (layer_idx == len(self.layers)):
+                blocks.append(partial)
+                partial = None
+
+        return self.final_residual(blocks) if exists(self.final_residual) else blocks[-1]
+
+    def _run_block_two_phase(self, blocks: list[Tensor], start: int, end: int) -> Tensor:
+        queries = torch.stack([self.residuals[i].effective_query() for i in range(start, end)], dim=0)
+        inter_sources = stack_layers(blocks)
+        inter = attn_with_stats(queries,inter_sources,self.eps)
+        partial = None
+        for local_idx, layer_idx in enumerate(range(start, end)):
+            stats = inter.select(local_idx)
+
+            if partial is not None:
+                intra = single_source_stats(queries[local_idx],partial,self.eps)
+                stats = merge_attn_stats(stats, intra)
+
+            h = stats.normalized()
+            out = self.layers[layer_idx](h)
+            partial = out if partial is None else (partial + out)
+
+        return partial
+
+    def forward(self, x: Tensor) -> Tensor:
+        blocks = [x]
+        depth = len(self.layers)
+        start = 0
+        while start < depth:
+            end = min(start + self.block_size, depth)
+            blocks.append(self._run_block_two_phase(blocks, start, end))
+            start = end
+
+        return self.final_residual(blocks) if exists(self.final_residual) else blocks[-1]
 
 # helpers
 
