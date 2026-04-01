@@ -1,3 +1,18 @@
+"""
+Attention Residual in one file
+
+Reference:
+    Kimi Team, Guangyu Chen, Yu Zhang, Jianlin Su, Weixin Xu, Siyuan Pan,
+    Yaoyu Wang, Yucheng Wang, Guanduo Chen, et al.
+    "Attention Residuals." arXiv:2603.15031, 2026.
+    https://arxiv.org/abs/2603.15031
+
+This module is a compact PyTorch reference implementation of: 
+    - Full AttnRes
+    - Block AttnRes
+    - two-phase inter/intra-block computation from the paper
+"""
+
 import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
@@ -349,3 +364,15 @@ class AttnResTransformer(nn.Module):
             x = self.backbone(x)
         x = self.final_norm(x)
         return self.to_logits(x)
+
+__all__ = [
+    'RMSNorm',
+    'DepthResidual',
+    'DepthResidualList',
+    'FullAttnResStack',
+    'BlockAttnResStack',
+    'PreNorm',
+    'CausalAttention',
+    'SwiGLU',
+    'AttnResTransformer',
+]
