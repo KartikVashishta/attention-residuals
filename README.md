@@ -1,62 +1,60 @@
-# Attension Residuals in one file.
+# Attention Residuals in one file
 
-A clean, single-file Pytorch implementation of **Attention Residuals**.
+A compact PyTorch reference implementation of **Attention Residuals** that you can read in one sitting, test quickly, and copy into a real model without dragging in a full training stack.
 
-The repo exists for a simple reason: the paper is interesting, the mechanism is useful and most people do **not** want to dig through huge training stack just to change one piece of residual.
+This repo is intentionally small:
 
-Have kept the implementation:
+- `attn_residuals.py` contains the core implementation
+- `smoke.py` is a quick sanity check
+- `train_shakespeare.py` is a small GPT-style experiment on Tiny Shakespeare
+- `assets/` holds paper figures plus a reproduced training chart from this repo
 
-- small enough to go through and test
-- simple enough to copy into your own model
-
-If you just want the code, copy `attn_residual.py` into your project.
-If you want it as a module `pip install -e .` and import it normally
+If you only want the implementation, copy [`attn_residuals.py`](attn_residuals.py) into your project and import from there.
 
 > Paper: **Attention Residuals**
 > arXiv: `2603.15031`  
-> Official repo: MoonshotAI/Attention-Residuals
+> Official repo: [MoonshotAI/Attention-Residuals](https://github.com/MoonshotAI/Attention-Residuals)
 
 ![Attention Residuals overview](assets/overview.png)
-![Attention Residuals scaling laws](assets/scaling-laws.png)
-![Attention Residuals training dynamics](assets/training-dynamics.png)
 
-## Why is it interesting
+## What AttnRes changes
 
-Standard PreNorm residuals keep adding every layer output with fixed weight `1`.
+Standard PreNorm transformers add each layer output back with a fixed residual weight of `1`.
 
-AttnRes changes that. Each layer gets a learned pseudo-query and pulls from earlier depth states with a **softmax over depth** instead of a blind sum. In the paper, that change improves scaling behavior, helps on reasoning and code benchmarks, and keeps hidden-state growth better behaved.
+Attention Residuals replace that blind accumulation with a learned depth-wise read. Each layer gets a pseudo-query and attends over earlier hidden states with a **softmax over depth**. The paper's practical version, **Block AttnRes**, keeps the idea while limiting the attention scope to completed blocks so the overhead stays manageable.
 
-The practical version is Block AttnRes:
+In plain terms, this gives you:
 
-- keep normal residual accumulation inside a small block
-- attend only across completed block summaries
-- uses the two-phase computation to keep overhead low
+- a learned way to reuse earlier depth states instead of summing everything equally
+- better control over hidden-state growth
+- a version that is still simple enough to drop into a normal GPT-style stack
 
-## What is in this repo
+## What is implemented here
 
-- Full AttnRes
-- Block AttnRes
-- the two phase Block AttnRes merge
+This repo includes:
 
-For most of it, the above's all that's needed but this repo also has a tiny GPT-style `AttnResTransformer`, a `smoke.py` for quick sanity checks and more...
+- `FullAttnResStack`: the cleanest reference version
+- `BlockAttnResStack`: the practical block-wise version
+- the two-phase online-softmax merge used by Block AttnRes
+- `AttnResTransformer`: a tiny GPT-style language model built around the stacks
 
-Note: this is just a reference implementation.
+This is a reference implementation, not a production training framework.
 
 ## Install
 
+There is no packaging boilerplate here on purpose. If you want to run the files directly:
+
 ```bash
 git clone https://github.com/KartikVashishta/attention-residuals.git
-cd attention-residual
-pip install -e .
+cd attention-residuals
+python3 -m venv venv
+source venv/bin/activate
+pip install torch einops requests matplotlib
 ```
 
-If you only want the implementation, just do the following
+If you only want the core implementation, `torch` and `einops` are enough.
 
-```python
-from attn_residual import BlockAttnResStack, FullAttnResStack, AttnResTransformer
-```
-
-## Quick Start
+## Quick start
 
 ```python
 import torch
@@ -81,31 +79,101 @@ print(logits.shape)  # (2, 128, 32000)
 
 ## Choosing Full vs Block
 
-### Use **block attnres** when
+### Use `block` when
 
-- you want the practical version and you care about keeping memory under control
-- you want the version closest to what you would actually scale
+- you want the version that is actually practical to scale
+- you care about keeping memory and compute overhead under control
+- you want the main idea without attending over every earlier atomic layer
 
-### Use **full attnres** when
+### Use `full` when
 
-- you want the cleanest conceptual version and you are just doing ablations
-- you want an exact reference for correctness checks
+- you want the cleanest conceptual reference
+- you are doing correctness checks or small ablations
+- you want to compare the exact mechanism against simpler residual schemes
 
-## One detail that matters a lot
+## One detail that matters
 
-`block_size` is measured in **atomic layers** not logical transformer blocks.
+`block_size` is measured in **atomic layers**, not logical transformer blocks.
 
-So if your backbone alternates:
+If your backbone alternates:
 
 - attention
 - MLP
 
-then one transformer block = **2 atomic layers**.
+then one transformer block equals **2 atomic layers**.
 
-That means:
+So in this repo:
 
+- `block_size=4` means **2 transformer blocks**
 - `block_size=8` means **4 transformer blocks**
-- `block_size=6` means **3 transformer blocks**
+
+## Tiny Shakespeare sanity check
+
+To ground the implementation in something concrete, I trained the tiny GPT-style setup from [`train_shakespeare.py`](train_shakespeare.py) on **Andrej Karpathy's Tiny Shakespeare** dataset and compared standard residuals against **Block AttnRes**.
+
+This is not a grand benchmark claim. It is a simple sanity check on a small character-level model with roughly the same parameter budget for both variants.
+
+**Experiment config**
+
+`dim=384`, `depth=6`, `heads=6`, `dim_head=64`, `ff_mult=4`, `max_seq_len=256`, `max_iters=2500`, `eval_interval=250`, `block_size=4`
+
+**Parameter budget**
+
+- Baseline: `14,308,992`
+- Block AttnRes: `14,318,976`
+- Extra params: `9,984` (`~0.07%`)
+
+**Headline result**
+
+| Model              | Best val loss |   Step | Final val loss |
+| ------------------ | ------------: | -----: | -------------: |
+| Standard residuals |      `1.5315` | `1000` |       `1.9451` |
+| Block AttnRes      |      `1.4948` | `2000` |       `1.5326` |
+
+Block AttnRes starts slightly worse, but it keeps improving after the baseline begins to overfit. In this run, the standard model drives training loss lower, while Block AttnRes holds validation loss down for longer and finishes much cleaner.
+
+![Tiny Shakespeare validation chart](assets/tiny-shakespeare-validation.svg)
+
+### What this run suggests
+
+- the implementation is doing something real, not just matching parameter counts on paper
+- the extra parameter cost is basically negligible at this scale
+- Block AttnRes looks more resistant to the late-training validation blow-up seen in the baseline
+
+<details>
+<summary>Full training log table</summary>
+
+| Step | Baseline train | Baseline val | Block AttnRes train | Block AttnRes val |
+| ---: | -------------: | -----------: | ------------------: | ----------------: |
+|    0 |       `4.3063` |     `4.3087` |            `4.3604` |          `4.3584` |
+|  250 |       `1.8705` |     `2.0040` |            `1.9758` |          `2.0945` |
+|  500 |       `1.4372` |     `1.6447` |            `1.5311` |          `1.7156` |
+|  750 |       `1.3038` |     `1.5602` |            `1.3856` |          `1.6125` |
+| 1000 |       `1.2250` |     `1.5315` |            `1.2964` |          `1.5341` |
+| 1250 |       `1.1479` |     `1.5409` |            `1.2284` |          `1.5216` |
+| 1500 |       `1.0865` |     `1.5641` |            `1.1801` |          `1.5060` |
+| 1750 |       `1.0070` |     `1.6032` |            `1.1297` |          `1.5043` |
+| 2000 |       `0.9232` |     `1.7014` |            `1.0767` |          `1.4948` |
+| 2250 |       `0.8276` |     `1.7916` |            `1.0302` |          `1.5201` |
+| 2499 |       `0.7344` |     `1.9451` |            `0.9812` |          `1.5326` |
+
+</details>
+
+## Running the checks
+
+Quick sanity check:
+
+```bash
+./venv/bin/python smoke.py
+```
+
+Tiny Shakespeare training run:
+
+```bash
+./venv/bin/python train_shakespeare.py
+```
+
+The training script downloads the Tiny Shakespeare dataset automatically if it is missing.
 
 ## Citation
 
